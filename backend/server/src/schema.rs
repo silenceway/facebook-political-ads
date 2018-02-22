@@ -22,3 +22,18 @@ table! {
         page -> Nullable<Text>,
     }
 }
+
+table! {
+    candidates (facebook_url) {
+        facebook_url -> Text,
+        name -> Text,
+        state -> Nullable<Varchar>,
+        district -> Nullable<Varchar>,
+        race_type -> Varchar,
+    }
+}
+
+allow_tables_to_appear_in_same_query!(
+    ads,
+    candidates,
+);

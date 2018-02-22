@@ -25,6 +25,7 @@ use rusoto_credential::DefaultCredentialsProvider;
 use rusoto_s3::{PutObjectRequest, S3, S3Client};
 use schema::ads;
 use schema::ads::BoxedQuery;
+use schema::candidates;
 use serde_json;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -602,6 +603,19 @@ impl<'a> NewAd<'a> {
 
         Ok(ad)
     }
+}
+
+#[derive(Serialize, Deserialize, Queryable, Debug, Clone, Insertable)]
+#[table_name="candidates"]
+pub struct Candidate {
+  pub facebook_url: String,
+  pub name: String,
+  pub state: String,
+  pub district: String,
+  pub race_type: String,
+}
+impl Candidate {
+
 }
 
 #[cfg(test)]
