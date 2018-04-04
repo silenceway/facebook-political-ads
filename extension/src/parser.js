@@ -2,6 +2,10 @@ import debounce from "lodash/debounce";
 
 const TIMELINE_SELECTOR = ".userContentWrapper";
 const SIDEBAR_SELECTOR = ".ego_unit";
+const DEBUG =
+  (process.env.NODE_ENV === "dev" || process.env.NODE_ENV) === "development"
+    ? "development"
+    : "production";
 
 // This function cleans all the elements that could leak user data
 // before sending to the server. It also removes any attributes that
@@ -73,6 +77,7 @@ const checkSponsor = node => {
         .getComputedStyle(a, ":after")
         .getPropertyValue("content");
       return [
+        "Gesponsord",
         "Sponsored",
         "Gesponsert",
         "Sponsrad",
@@ -112,10 +117,10 @@ let targetingCache = new Map();
 const getTargeting = ad => {
   if (ad.targeting) {
     if (targetingCache.has(ad.targeting))
-      return {
+      return Promise.resolve({
         ...ad,
         targeting: targetingCache.get(ad.targeting)
-      };
+      });
     const url = ad.targeting;
     delete ad.targeting;
     if (targetingBlocked) return ad;
@@ -140,6 +145,7 @@ const getTargeting = ad => {
           } catch (e) {
             targetingBlocked = true;
             setTimeout(() => (targetingBlocked = false), 15 * 60 * 100);
+            ad.targeting = null;
             resolve(ad);
           }
         }
@@ -170,7 +176,8 @@ const getTargeting = ad => {
       req.send();
     });
   } else {
-    return ad;
+    ad.targeting = null;
+    return Promise.resolve(ad);
   }
 };
 
@@ -178,8 +185,28 @@ const getTargeting = ad => {
 // restore the state of the page when the extension clicks around.
 const refocus = cb => {
   const focus = document.activeElement;
+  const ranges = [];
+  for (var i = 0; i < window.getSelection().rangeCount; i++) {
+    let range = window.getSelection().getRangeAt(i);
+    ranges.push([
+      range.startContainer,
+      range.startOffset,
+      range.endContainer,
+      range.endOffset
+    ]);
+  }
   cb();
   if (focus) focus.focus();
+  if (ranges.length > 0) {
+    const newSelection = window.getSelection();
+    newSelection.removeAllRanges();
+    ranges.forEach(range_attrs => {
+      const range = document.createRange();
+      range.setStart(range_attrs[0], range_attrs[1]);
+      range.setEnd(range_attrs[2], range_attrs[3]);
+      newSelection.addRange(range);
+    });
+  }
 };
 
 // All of the menus on Facebook are asynchronously opened so we have to use a observer here to make
@@ -190,7 +217,15 @@ const parseMenu = (ad, selector, toggle, toggleId, menuFilter, filter) => (
   resolve,
   reject
 ) => {
+  let time = Date.now();
   let cb = (record, self) => {
+    // give up if we haven't got anything after a second
+    if (Date.now() - time > 1000) {
+      self.disconnect();
+      // in debug, mark the button green if we failed to get the menu for this ad.
+      if (DEBUG) toggle.style.backgroundColor = "#630000";
+      return reject("no menu");
+    }
     const menu = menuFilter();
     if (!menu) return null;
     const li = Array.from(menu.querySelectorAll("li")).filter(filter)[0];
@@ -199,6 +234,7 @@ const parseMenu = (ad, selector, toggle, toggleId, menuFilter, filter) => (
     if (!endpoint) return null;
     const url = endpoint.getAttribute("ajaxify");
     refocus(() => toggle.click());
+    if (DEBUG) toggle.style.backgroundColor = "unset";
     self.disconnect();
     try {
       const resolved = {
@@ -218,12 +254,11 @@ const parseMenu = (ad, selector, toggle, toggleId, menuFilter, filter) => (
     }
   };
 
-  new MutationObserver(debounce(cb, 100)).observe(
+  new MutationObserver(debounce(cb, 250)).observe(
     document.querySelector("#globalContainer"),
     {
       childList: true,
-      subtree: true,
-      attributes: false
+      subtree: true
     }
   );
   refocus(() => toggle.click());
@@ -293,7 +328,7 @@ const getSidebarId = (parent, ad) => {
 const timeline = node => {
   const sponsor = checkSponsor(node);
   // First we check if it is actually a sponsored post
-  if (!checkSponsor(node)) return Promise.resolve(false);
+  if (!sponsor) return Promise.resolve(false);
 
   // And then we try to grab the parent container that has a hyperfeed id
   let parent = node;
@@ -313,6 +348,10 @@ const timeline = node => {
   // and shares.
   if (node.querySelector(TIMELINE_SELECTOR))
     node = node.querySelector(TIMELINE_SELECTOR);
+
+  // in debug, mark an ad green once we've selected it to be submitted (to help find ads that we
+  // don't recognize or posts we mistakenly believe are ads)
+  if (DEBUG) parent.style.color = "#006304";
 
   // Finally we have something to save.
   return getTimelineId(parent, {

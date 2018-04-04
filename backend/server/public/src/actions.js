@@ -1,4 +1,6 @@
-import { headers } from "utils.js";
+import { headers, serialize } from "utils.js";
+import { debounce } from "lodash";
+import history from "./history.js";
 
 export const NEW_ADS = "new_ads";
 export const newAds = ads => ({
@@ -18,6 +20,17 @@ export const requestingOneAd = ad_id => ({
   ad_id: ad_id
 });
 
+export const GOT_RECENT_GROUPED_ATTR = "GOT_RECENT_GROUPED_ATTR";
+export const receiveRecentGroupedAttr = groupedAttrs => ({
+  type: GOT_RECENT_GROUPED_ATTR,
+  groupedAttrs
+});
+
+export const REQUESTING_RECENT_GROUPED_ATTR = "REQUESTING_RECENT_GROUPED_ATTR";
+export const requestingRecentGroupedAttr = () => ({
+  type: REQUESTING_RECENT_GROUPED_ATTR
+});
+
 export const SET_LANG = "set_lang";
 export const setLang = lang => ({
   type: SET_LANG,
@@ -29,6 +42,25 @@ export const newSearch = query => ({
   type: NEW_SEARCH,
   value: query
 });
+
+const asyncResetPage = action => {
+  return (dispatch, getState) => {
+    dispatch(setPage(0));
+    return async(action)(dispatch, getState);
+  };
+};
+
+const async = action => {
+  return (dispatch, getState) => {
+    dispatch(action);
+    return getAds()(dispatch, getState);
+  };
+};
+export const fetchSearch = query => asyncResetPage(newSearch(query));
+
+export const throttledDispatch = debounce((dispatch, input) => {
+  dispatch(fetchSearch(input));
+}, 750);
 
 export const BATCH = "batch";
 export const batch = (...actions) => ({
@@ -50,6 +82,9 @@ export const FILTER_TARGET = "filter_target";
 export const filterEntity = a(FILTER_ENTITY);
 export const filterAdvertiser = a(FILTER_ADVERTISER);
 export const filterTarget = a(FILTER_TARGET);
+export const fetchEntity = e => asyncResetPage(filterEntity(e));
+export const fetchAdvertiser = a => asyncResetPage(filterAdvertiser(a));
+export const fetchTarget = t => asyncResetPage(filterTarget(t));
 
 export const TOGGLE_TARGET = "toggle_target";
 export const TOGGLE_ADVERTISER = "toggle_advertiser";
@@ -65,8 +100,11 @@ export const PREV_PAGE = "prev_page";
 export const SET_PAGE = "set_page";
 export const SET_TOTAL = "set_total";
 export const nextPage = () => ({ type: NEXT_PAGE });
+export const fetchNextPage = () => async(nextPage());
 export const prevPage = () => ({ type: PREV_PAGE });
+export const fetchPrevPage = () => async(prevPage());
 export const setPage = page => ({ type: SET_PAGE, value: page });
+export const fetchPage = page => async(setPage(page));
 export const setTotal = total => ({ type: SET_TOTAL, value: total });
 
 export const getOneAd = (ad_id, url = "/facebook-ads/ads") => {
@@ -83,6 +121,56 @@ export const getOneAd = (ad_id, url = "/facebook-ads/ads") => {
       .then(res => res.json())
       .then(ad => {
         dispatch(receiveOneAd(ad));
+      });
+  };
+};
+
+export const RECENT = "recent";
+export const getGroupedAttrs = (
+  groupingKind = "advertiser",
+  recent = null,
+  root_url = "/facebook-ads"
+) => {
+  let path = `${root_url}/${recent === RECENT ? "recent_" : ""}${groupingKind +
+    "s"}`;
+  return (dispatch, getState) => {
+    let state = getState();
+    dispatch(requestingRecentGroupedAttr());
+    return fetch(path, {
+      method: "GET",
+      headers: headers(state.credentials, state.lang)
+    })
+      .then(res => res.json())
+      .then(resp => {
+        dispatch(receiveRecentGroupedAttr(resp));
+      });
+  };
+};
+
+export const getAds = (url = "/facebook-ads/ads") => {
+  return (dispatch, getState) => {
+    let state = getState();
+    const params = serialize(state);
+    let path = `${url}?${params.toString()}`;
+
+    let query = params.toString().length > 0 ? `?${params.toString()}` : "";
+    history.push({ search: query }, "", `${location.pathname}${query}`);
+    return fetch(path, {
+      method: "GET",
+      headers: headers(state.credentials, state.lang)
+    })
+      .then(res => res.json())
+      .then(ads => {
+        dispatch(
+          batch(
+            newAds(ads.ads),
+            newEntities(ads.entities),
+            newAdvertisers(ads.advertisers),
+            newTargets(ads.targets),
+            setTotal(ads.total),
+            setPage(parseInt(params.get("page"), 0) || 0)
+          )
+        );
       });
   };
 };

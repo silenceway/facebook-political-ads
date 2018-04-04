@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom";
-import { BrowserRouter } from "react-router-dom";
+import { Router } from "react-router-dom";
+import createHistory from "history/createBrowserHistory";
 import { applyMiddleware, compose, combineReducers, createStore } from "redux";
 import thunkMiddleware from "redux-thunk";
 import persistState from "redux-localstorage";
@@ -17,7 +18,8 @@ import {
   ads,
   ad,
   credentials,
-  enableBatching
+  enableBatching,
+  groupedAttribute
 } from "reducers.js";
 import { go } from "i18n.js";
 import Admin from "components/admin/admin.jsx";
@@ -33,7 +35,8 @@ const reducer = enableBatching(
     filters,
     pagination,
     credentials,
-    lang
+    lang,
+    groupedAttribute
   })
 );
 
@@ -44,12 +47,14 @@ const store = createStore(
 );
 
 go(() => {
+  const history = createHistory();
+
   ReactDOM.render(
-    <BrowserRouter>
+    <Router history={history}>
       <Provider store={store}>
         <Admin />
       </Provider>
-    </BrowserRouter>,
+    </Router>,
     document.querySelector("#react-root")
   );
 });

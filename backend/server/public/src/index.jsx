@@ -1,7 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom";
 import { applyMiddleware, combineReducers, compose, createStore } from "redux";
-import { BrowserRouter } from "react-router-dom";
+import { Router } from "react-router-dom";
+import history from "./history.js";
 import thunkMiddleware from "redux-thunk";
 import { Provider } from "react-redux";
 import { createLogger } from "redux-logger";
@@ -17,7 +18,6 @@ import {
   pagination,
   lang
 } from "reducers.js";
-import { refresh, deserialize } from "utils.js";
 import { go } from "i18n.js";
 import { enableBatching } from "reducers.js";
 
@@ -40,14 +40,16 @@ const store = createStore(reducer, compose(applyMiddleware(...middleware)));
 
 go(() => {
   ReactDOM.render(
-    <BrowserRouter>
+    <Router history={history}>
       <Provider store={store}>
         <Frontend />
       </Provider>
-    </BrowserRouter>,
+    </Router>,
     document.querySelector("#graphic")
   );
-
-  deserialize(store.dispatch);
-  refresh(store).then(() => store.subscribe(() => refresh(store)));
+  history.listen(() => {
+    if (window.ga) {
+      window.ga("send", "pageview");
+    }
+  });
 });

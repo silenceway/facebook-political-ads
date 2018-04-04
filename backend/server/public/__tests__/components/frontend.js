@@ -1,20 +1,20 @@
 import React from "react";
-import Enzyme, { shallow } from "enzyme";
+import Enzyme, { mount, shallow } from "enzyme";
 import Adapter from "enzyme-adapter-react-16";
 import { FrontEnd } from "../../src/components/frontend.jsx";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route } from "react-router-dom";
+import AdDetail from "components/addetail.jsx";
+import AdList from "components/adlist.jsx";
+
 Enzyme.configure({ adapter: new Adapter() });
-import { go } from "i18n.js";
 
 function setup(path) {
   const props = {};
-  const enzymeWrapper = shallow(
-    <MemoryRouter initialEntries={[path]}>
+  const enzymeWrapper = mount(
+    <MemoryRouter initialEntries={[path]} initialIndex={0}>
       <FrontEnd {...props} />
     </MemoryRouter>
-  )
-    .dive()
-    .dive();
+  );
 
   return {
     props,
@@ -24,26 +24,33 @@ function setup(path) {
 describe("components", () => {
   describe("FrontEnd", () => {
     it("should render itself", () => {
-      go(() => {
-        const { enzymeWrapper } = setup({
-          ads: []
-        });
-        expect(enzymeWrapper.find("#app")).toHaveLength(1);
+      const { enzymeWrapper } = setup({
+        ads: []
       });
+      expect(enzymeWrapper.find("#app")).toHaveLength(1);
     });
 
-    it("should render AdDetail on a detail route", () => {
-      go(() => {
-        const { enzymeWrapper } = setup("facebook-ads/ad/1234567890");
-        expect(enzymeWrapper.find("Connect(AdDetail)")).toHaveLength(1);
-      });
-    });
+    // via https://stackoverflow.com/questions/41531465/how-to-test-react-router-by-enzyme
+  });
+  describe("FrontEnd (routing)", () => {
+    const enzymeWrapper = shallow(
+      <MemoryRouter initialEntries={["/facebook-ads/"]}>
+        <FrontEnd />
+      </MemoryRouter>
+    )
+      .dive()
+      .dive();
+    const pathMap = enzymeWrapper.find(Route).reduce((pathMap, route) => {
+      const routeProps = route.props();
+      pathMap[routeProps.path] = routeProps.component;
+      return pathMap;
+    }, {});
 
-    it("should render AdList on index routes", () => {
-      go(() => {
-        const { enzymeWrapper } = setup("facebook-ads/");
-        expect(enzymeWrapper.find("Connect(AdList)")).toHaveLength(1);
-      });
+    it("should render the Ads dashboard for route /", () => {
+      expect(pathMap["/facebook-ads"]).toBe(AdList);
+    });
+    it("should render AdDetail for routes with an ad ID", () => {
+      expect(pathMap["/facebook-ads/ad/:ad_id"]).toBe(AdDetail);
     });
   });
 });

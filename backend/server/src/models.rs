@@ -1,11 +1,12 @@
 use chrono::DateTime;
 use chrono::offset::Utc;
 use diesel;
+use diesel::debug_query;
 use diesel::dsl::sql;
 use diesel::pg::Pg;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Text};
+use diesel::sql_types::{BigInt, Bool, Text};
 use diesel_full_text_search::*;
 use errors::*;
 use futures::{stream, Future, Stream};
@@ -76,7 +77,7 @@ pub fn get_message(document: &kuchiki::NodeRef) -> Result<String> {
 }
 
 // Only available in timeline ads
-pub fn get_advertiser_link(
+pub fn get_author_link(
     document: &kuchiki::NodeRef,
 ) -> Result<kuchiki::NodeDataRef<kuchiki::ElementData>> {
     document_select(document, ".fwb > a")?
@@ -165,6 +166,19 @@ impl Images {
     }
 }
 
+macro_rules! agg {
+    ($query:expr) => ({
+        $query.select((
+                sql::<BigInt>("count(*) as count"),
+                sql::<Text>(Self::column()),
+            ))
+            .group_by(sql::<Text>(Self::field()))
+            /* Ideally we'd have a .having() here, but it's not implemented yet in Diesel. */
+            .order(sql::<BigInt>("count desc"))
+            .filter(sql::<Text>(Self::null_check()).is_not_null())
+    })
+}
+
 pub trait Aggregate<T: Queryable<(BigInt, Text), Pg>> {
     fn field() -> &'static str {
         Self::column()
@@ -178,19 +192,36 @@ pub trait Aggregate<T: Queryable<(BigInt, Text), Pg>> {
 
     fn get(
         language: &str,
+        limit: &Option<i64>,
+        interval: &Option<&str>,
+        conn: &Pool<ConnectionManager<PgConnection>>,
+    ) -> Result<Vec<T>> {
+        // uncomment to use PgInterval
+        // use diesel::dsl::now;
+        // use diesel::pg::expression::extensions::IntervalDsl;
+        // use schema::ads::columns::created_at;
+        let connection = conn.get()?;
+
+        let query = agg!(match interval {
+            &Some(interv) => {
+                let mut interval_str = String::from("created_at > NOW() - interval '");
+                interval_str.push_str(interv);
+                interval_str.push_str("'");
+                Ad::scoped(language).filter(sql::<Bool>(&interval_str)) // .filter(created_at.gt( now - interval.unwrap_or(1.months()) )) // uncomment to use PgInterval
+            }
+            &None => Ad::scoped(language),
+        }).limit(limit.unwrap_or(20));
+        println!("{}", debug_query::<Pg, _>(&query));
+        Ok(query.load::<T>(&*connection)?)
+    }
+
+    fn search(
+        language: &str,
         conn: &Pool<ConnectionManager<PgConnection>>,
         options: &HashMap<String, String>,
     ) -> Result<Vec<T>> {
         let connection = conn.get()?;
-        let query = Ad::get_ads_query(language, options)
-            .select((
-                sql::<BigInt>("count(*) as count"),
-                sql::<Text>(Self::column()),
-            ))
-            .group_by(sql::<Text>(Self::field()))
-            .order(sql::<BigInt>("count desc"))
-            .filter(sql::<Text>(Self::null_check()).is_not_null())
-            .limit(20);
+        let query = agg!(Ad::search_query(language, options)).limit(20);
         Ok(query.load::<T>(&*connection)?)
     }
 }
@@ -211,6 +242,29 @@ where
 
     fn column() -> &'static str {
         "jsonb_array_elements(targets)->>'target' as target"
+    }
+
+    fn null_check() -> &'static str {
+        "targets"
+    }
+}
+
+#[derive(Queryable, Serialize, Deserialize, Debug, Clone)]
+pub struct Segments {
+    pub count: i64,
+    pub segment: String,
+}
+
+impl<T> Aggregate<T> for Segments
+where
+    T: Queryable<(BigInt, Text), Pg>,
+{
+    fn field() -> &'static str {
+        "segment"
+    }
+
+    fn column() -> &'static str {
+        "('{\"segment\": \"(n/a)\"}' || jsonb_array_elements(targets)->>'segment') as segment"
     }
 
     fn null_check() -> &'static str {
@@ -387,31 +441,33 @@ impl Ad {
             .collect()
     }
 
-    pub fn get_total(
+    pub fn scoped<'a>(language: &'a str) -> BoxedQuery<'a, Pg> {
+        use schema::ads::dsl::*;
+        ads.filter(lang.eq(language))
+            .filter(political_probability.gt(0.70))
+            .filter(suppressed.eq(false))
+            .into_boxed()
+    }
+
+    pub fn search_total(
         language: &str,
         conn: &Pool<ConnectionManager<PgConnection>>,
         options: &HashMap<String, String>,
     ) -> Result<i64> {
         let connection = conn.get()?;
-        let count = Ad::get_ads_query(language, options)
+        let count = Ad::search_query(language, options)
             .count()
             .get_result::<i64>(&*connection)?;
         Ok(count)
     }
 
-    pub fn get_ads_query<'a>(
+    pub fn search_query<'a>(
         language: &'a str,
         options: &'a HashMap<String, String>,
     ) -> BoxedQuery<'a, Pg> {
         use schema::ads::dsl::*;
-        let mut query = ads.filter(lang.eq(language))
-            .filter(political_probability.gt(0.70))
-            .filter(suppressed.eq(false))
-            .into_boxed();
+        let mut query = Ad::scoped(language);
 
-        if let Some(ad_id) = options.get("id") {
-            query = query.filter(id.eq(ad_id));
-        }
         if let Some(search) = options.get("search") {
             query = match &language[..2] {
                 "de" => {
@@ -426,7 +482,6 @@ impl Ad {
             let targts: Result<Vec<Targeting>> = serde_json::from_str(target).map_err(|e| e.into());
             if targts.is_ok() {
                 let json = serde_json::to_string(&targts.unwrap()).unwrap();
-                // WARNING! Possible injection, always rely on serde serialization above.
                 query = query.filter(sql(&format!("targets @> '{}'", json)));
             }
         }
@@ -451,21 +506,19 @@ impl Ad {
         query
     }
 
-    pub fn get_ads(
+    pub fn search(
         language: &str,
         conn: &Pool<ConnectionManager<PgConnection>>,
         options: &HashMap<String, String>,
     ) -> Result<Vec<Ad>> {
         use schema::ads::dsl::*;
-
         let connection = conn.get()?;
-
-        let mut query = Ad::get_ads_query(language, options);
+        let mut query = Ad::search_query(language, options);
 
         if let Some(p) = options.get("page") {
             let raw_offset = p.parse::<usize>().unwrap_or_default() * 20;
-            let offset = if raw_offset > 10000 {
-                10000
+            let offset = if raw_offset > 10_000 {
+                10_000
             } else {
                 raw_offset
             };
@@ -478,15 +531,22 @@ impl Ad {
             .load::<Ad>(&*connection)?)
     }
 
-    pub fn get_ad(
+    pub fn find(
         language: &str,
         conn: &Pool<ConnectionManager<PgConnection>>,
-        options: &HashMap<String, String>,
+        id: String,
     ) -> Result<Option<Ad>> {
+        use schema::ads::dsl::id as db_id;
         let connection = conn.get()?;
-        let query = Ad::get_ads_query(language, &options);
-        Ok(query.limit(1).first::<Ad>(&*connection).optional()?) // returns a Result with value of Ok(Option(Ad)) OR a Result with value
-                                                                 // Err(somethin)
+        let query = Ad::scoped(language);
+        info!("Getting from db {}", id);
+        // returns a Result with value of Ok(Option(Ad)) OR a Result with value
+        // Err(somethin)
+        Ok(query
+            .filter(db_id.eq(id))
+            .limit(1)
+            .first::<Ad>(&*connection)
+            .optional()?)
     }
 
     pub fn suppress(adid: String, conn: &Pool<ConnectionManager<PgConnection>>) -> Result<()> {
@@ -502,20 +562,19 @@ impl Ad {
     }
 }
 
-pub fn get_targets(targeting: Option<String>) -> Option<Value> {
-    match targeting {
-        Some(ref targeting) => collect_targeting(&targeting)
+pub fn get_targets(targeting: &Option<String>) -> Option<Value> {
+    match *targeting {
+        Some(ref targeting) => collect_targeting(targeting)
             .map(|t| serde_json::to_value(t).unwrap())
             .ok(),
         None => None,
     }
 }
 
-pub fn get_advertiser(targeting: Option<String>, document: &kuchiki::NodeRef) -> Option<String> {
-    match targeting {
-        Some(ref targeting) => collect_advertiser(&targeting).or(get_advertiser_link(document)
-            .map(|a| a.text_contents())
-            .ok()),
+pub fn get_advertiser(targeting: &Option<String>, document: &kuchiki::NodeRef) -> Option<String> {
+    match *targeting {
+        Some(ref targeting) => collect_advertiser(targeting)
+            .or_else(|| get_author_link(document).map(|a| a.text_contents()).ok()),
         None => None,
     }
 }
@@ -566,9 +625,9 @@ impl<'a> NewAd<'a> {
             images: images,
             impressions: if !ad.political.is_some() { 1 } else { 0 },
             targeting: ad.targeting.clone(),
-            targets: get_targets(ad.targeting.clone()),
-            advertiser: get_advertiser(ad.targeting.clone(), &document),
-            page: get_advertiser_link(&document)
+            targets: get_targets(&ad.targeting),
+            advertiser: get_advertiser(&ad.targeting, &document),
+            page: get_author_link(&document)
                 .ok()
                 .and_then(|l| l.attributes.borrow().get("href").map(|i| i.to_string())),
         })
@@ -596,7 +655,7 @@ impl<'a> NewAd<'a> {
             diesel::update(ads.find(self.id))
                 .set((
                     targeting.eq(&self.targeting),
-                    targets.eq(get_targets(ad.targeting.clone())),
+                    targets.eq(get_targets(&ad.targeting)),
                 ))
                 .execute(&*connection)?;
         };
